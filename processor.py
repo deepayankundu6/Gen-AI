@@ -19,13 +19,25 @@ from requests.exceptions import RequestException
 from embedding_generator import EmbeddingGenerator
 from response_generator import ResponseGenerator, ResponseAPIError
 
-# Constants
-DEFAULT_OPENAI_API_BASE = "http://localhost:5000/v1"
-DEFAULT_MONGO_URI = "mongodb://localhost:27017"
-DB_NAME = "Gen_AI"
-EMBEDDING_COLLECTION = "Embedings"
-RESULT_COLLECTION = "Results"
-API_KEY = "Dummy api key"
+# Load configuration from environment
+from config import (
+    get_api_config,
+    get_mongo_config,
+    get_model_config,
+    get_batch_size,
+    validate_config
+)
+
+# Get configuration
+try:
+    validate_config()
+    OPENAI_API_BASE, API_KEY = get_api_config()
+    MONGO_URI, DB_NAME, EMBEDDING_COLLECTION, RESULT_COLLECTION = get_mongo_config()
+    EMBEDDING_MODEL, RESPONSE_MODEL = get_model_config()
+    DEFAULT_BATCH_SIZE = get_batch_size()
+except ValueError as e:
+    print("Configuration error:", str(e))
+    sys.exit(1)
 
 
 def save_documents(mongo_uri: str, embedding_docs: List[Dict[str, Any]], response_docs: List[Dict[str, Any]]) -> None:
@@ -56,7 +68,7 @@ def save_documents(mongo_uri: str, embedding_docs: List[Dict[str, Any]], respons
         client.close()
 
 
-def build_embedding_docs(texts: List[str], embeddings: List[List[float]]) -> List[Dict[str, Any]]:
+def build_embedding_docs(texts: List[str], embeddings: List[List[float]], model: str) -> List[Dict[str, Any]]:
     """Build documents for the embeddings collection."""
     docs = []
     ts = int(time.time())
@@ -66,12 +78,13 @@ def build_embedding_docs(texts: List[str], embeddings: List[List[float]]) -> Lis
             "embedding": emb,
             "created_at": ts,
             "source": "local_script",
+            "model": model,
             "index": i,
         })
     return docs
 
 
-def build_response_docs(texts: List[str], responses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_response_docs(texts: List[str], responses: List[Dict[str, Any]], model: str) -> List[Dict[str, Any]]:
     """Build documents for the responses collection."""
     docs = []
     ts = int(time.time())
@@ -81,7 +94,8 @@ def build_response_docs(texts: List[str], responses: List[Dict[str, Any]]) -> Li
             "response": resp["text"],
             "created_at": resp.get("created_at", ts),
             "response_id": resp.get("id"),
-            "model": resp.get("model"),
+            "model": model,  # Use the actual model name passed
+            "model_response": resp.get("model"),  # Keep the model name from response too
             "usage": resp.get("usage", {}),
             "source": "local_script",
             "index": i,
@@ -110,12 +124,18 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--text", "-t", help="Text to process")
     group.add_argument("--file", "-f", help="Path to newline-delimited file of texts")
     group.add_argument("--console", "-c", action="store_true", help="Read text lines from console/STDIN")
-    p.add_argument("--embedding-model", default="text-embedding-3-small", help="Embedding model to use")
-    p.add_argument("--response-model", default="deepseek/deepseek-r1-0528-qwen3-8b", help="Response model to use")
-    p.add_argument("--api-base", default=os.environ.get("OPENAI_API_BASE", DEFAULT_OPENAI_API_BASE), help="OpenAI API base URL")
-    p.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", API_KEY), help="OpenAI API key")
-    p.add_argument("--mongo", default=os.environ.get("MONGO_URI", DEFAULT_MONGO_URI), help="MongoDB URI")
-    p.add_argument("--batch-size", type=int, default=16, help="Number of texts per request")
+    p.add_argument("--embedding-model", default=EMBEDDING_MODEL, 
+                    help="Embedding model to use (env: EMBEDDING_MODEL)")
+    p.add_argument("--response-model", default=RESPONSE_MODEL,
+                    help="Response model to use (env: RESPONSE_MODEL)")
+    p.add_argument("--api-base", default=OPENAI_API_BASE,
+                    help="OpenAI API base URL (env: OPENAI_API_BASE)")
+    p.add_argument("--api-key", default=API_KEY,
+                    help="OpenAI API key (env: OPENAI_API_KEY)")
+    p.add_argument("--mongo", default=MONGO_URI,
+                    help="MongoDB URI (env: MONGO_URI)")
+    p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                    help="Number of texts per request (env: BATCH_SIZE)")
     return p.parse_args()
 
 
@@ -177,7 +197,7 @@ def main() -> int:
                 # Get embeddings
                 print(f"Getting embeddings.....")
                 embeddings = embedding_gen.get_embeddings("".join(batch), model=args.embedding_model)
-                embedding_docs = build_embedding_docs(batch, embeddings)
+                embedding_docs = build_embedding_docs(batch, embeddings, args.embedding_model)
                 all_embedding_docs.extend(embedding_docs)
                 print(f"Embeddings received.")
                 # Get responses
@@ -192,7 +212,7 @@ def main() -> int:
                             print(f"Tokens used: {usage.get('total_tokens', 0)} "
                                   f"(input: {usage.get('input_tokens', 0)}, "
                                   f"output: {usage.get('output_tokens', 0)})")
-                    response_docs = build_response_docs(batch, responses)
+                    response_docs = build_response_docs(batch, responses, args.response_model)
                     all_response_docs.extend(response_docs)
                     print(f"Responses received successfully")
                 except ResponseAPIError as e:
